@@ -1,0 +1,46 @@
+# Build + test both crates. The suite is hermetic on purpose: every integration test starts a
+# fake inference server on 127.0.0.1 and points the real client at it, so CI needs no network,
+# no GPU, no model weights, and no secrets.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # `cargo fmt --check` guards the one thing a reviewer cannot see in a diff: formatting
+      # drift across a 7k-line crate.
+      - run: cargo fmt --all --check
+
+      # Each crate ships its own LICENSE, because `cargo package` only picks up files at the
+      # *package* root -- a single copy at the workspace root would leave the published tarball
+      # without the licence text. They are copies rather than symlinks so the tarball contains a
+      # real file; this check is what stops the copies from drifting.
+      - name: licence copies agree
+        run: |
+          diff LICENSE weigh/LICENSE
+          diff LICENSE semif-vllm/LICENSE
+
+      # The build needs a C and C++ compiler: `tokenizers` pulls `onig` (regex pre-tokenizers)
+      # and `esaxx-rs` through its default features. ubuntu-latest ships both.
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+      - name: release build
+        run: cargo build --workspace --release

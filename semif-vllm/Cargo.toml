@@ -1,0 +1,31 @@
+[package]
+name = "semif-vllm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "SemIf's decision API over HTTP: one conditional answer-slot distribution per request"
+readme = "README.md"
+keywords = ["llm", "vllm", "sglang", "openai-compatible", "classification"]
+categories = ["web-programming::http-server", "science"]
+
+[dependencies]
+# The generic readout: which token ids to read, what the answer means, and the provenance to
+# attribute it. This binary owns SemIf's contract (the `direct-options-v1` prompt and the
+# criterion/evidence fold) and the HTTP surface; it owns no transport, no tokenizer and no
+# softmax.
+weigh = { path = "../weigh" }
+
+# `float_roundtrip` is REQUIRED, not an optimization: without it serde_json's fast float
+# parser is not correctly rounded, which silently corrupts the logprobs a server returns
+# exactly. The lib sets it too; it is repeated here because this crate parses request bodies
+# and the OpenAPI document with the same parser.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+# Small, synchronous HTTP/1.1 with no async runtime and no TLS, which matches this crate's
+# deliberate "plain HTTP behind a gateway" footprint.
+tiny_http = "0.12"
+# SIGTERM/SIGINT handling for graceful drain: `flag::register` flips an `AtomicBool` from the
+# signal handler, so the accept loop can stop and let in-flight readouts finish. Safe API (no
+# `unsafe` in this crate) and no runtime of its own.
+signal-hook = "0.3"
