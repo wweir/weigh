@@ -1307,7 +1307,7 @@ fn probe_vllm_media(
                 Ok(response) => read_support(&response)?,
                 Err(CallError::Status { code, .. }) if code == 400 || code == 422 => {
                     eprintln!(
-                        "semif-vllm: media disabled at {}: the /v1/chat/completions image \
+                        "weigh: media disabled at {}: the /v1/chat/completions image \
                          probe was refused without `logprob_token_ids` too (HTTP {})",
                         url, code
                     );
@@ -1325,7 +1325,7 @@ fn probe_vllm_media(
         // nothing about that ability and must not be recorded as "unsupported".
         Err(CallError::Status { code, detail }) if code == 400 || code == 422 => {
             eprintln!(
-                "semif-vllm: media disabled at {}: the /v1/chat/completions image probe was \
+                "weigh: media disabled at {}: the /v1/chat/completions image probe was \
                  refused (HTTP {}): {}",
                 url,
                 code,
@@ -1344,7 +1344,7 @@ fn probe_vllm_media(
     // reported as unavailable rather than silently accepted.
     if policy == MediaPolicy::ExactSlot && support == MediaSupport::ChatTopN {
         eprintln!(
-            "semif-vllm: media disabled at {}: --allow-media requires the exact-slot media \
+            "weigh: media disabled at {}: --allow-media requires the exact-slot media \
              route, but this build answers under decoded text. Pass --allow-media-topn to \
              accept the best-effort route.",
             url

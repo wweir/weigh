@@ -32,7 +32,7 @@ jobs:
       - name: licence copies agree
         run: |
           diff LICENSE weigh/LICENSE
-          diff LICENSE semif-vllm/LICENSE
+          diff LICENSE weighd/LICENSE
 
       # The build needs a C and C++ compiler: `tokenizers` pulls `onig` (regex pre-tokenizers)
       # and `esaxx-rs` through its default features. ubuntu-latest ships both.

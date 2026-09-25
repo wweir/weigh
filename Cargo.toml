@@ -1,15 +1,15 @@
 # Two crates on purpose:
 #
-#   weigh  the library: ask an OpenAI-compatible server for the exact logprobs of
+#   weigh          the library: ask an OpenAI-compatible server for the exact logprobs of
 #                  caller-named answer slots, and get a subset softmax plus provenance
-#   semif-vllm     one consumer: SemIf's `direct-options-v1` decision API, served over HTTP
+#   weighd         one consumer: SemIf's `direct-options-v1` decision API, served over HTTP
 #
 # The split is a real API boundary, not a rename: the library never sees a "criterion",
 # an "evidence" string, or a `direct-options-v1` prompt, and it does not depend on the HTTP
 # service layer. SemIf's contract lives entirely in the binary.
 [workspace]
 resolver = "2"
-members = ["weigh", "semif-vllm"]
+members = ["weigh", "weighd"]
 
 [workspace.package]
 edition = "2021"

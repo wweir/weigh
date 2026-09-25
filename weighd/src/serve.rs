@@ -350,7 +350,7 @@ pub fn run(argv: &[String]) -> Result<(), String> {
     }
     if args.readout == Readout::TopN {
         eprintln!(
-            "semif-vllm: warning: --readout top-n selected; a row whose answer slot misses the \
+            "weighd: warning: --readout top-n selected; a row whose answer slot misses the \
              top-20 is read through /generative_scoring, and that fallback rate rises with load. \
              Each response records which path it used in choices[].semif.fallback_used."
         );
@@ -382,7 +382,7 @@ pub fn run(argv: &[String]) -> Result<(), String> {
     });
 
     eprintln!(
-        "semif-vllm serve: listening on http://{} (POST /v1/chat/completions), backend={}, \
+        "weighd: listening on http://{} (POST /v1/chat/completions), backend={}, \
          model={}, revision={}, prompt_version={}, prompt_template={} ({}) serving_config={}, \
          workers={}",
         address,
@@ -440,7 +440,7 @@ pub fn run(argv: &[String]) -> Result<(), String> {
         }
     }
     if shutdown.load(Ordering::Relaxed) {
-        eprintln!("semif-vllm serve: drained in-flight requests and exiting on a shutdown signal");
+        eprintln!("weighd: drained in-flight requests and exiting on a shutdown signal");
     }
     Ok(())
 }
@@ -1658,7 +1658,7 @@ fn request_id(criterion: &str, evidence: &str, schema: &DecisionSchema) -> Strin
     sha256_hex(&preimage)[..24].to_string()
 }
 
-const SERVE_USAGE: &str = r#"usage: semif-vllm --model DIR [--url URL]... [options]
+const SERVE_USAGE: &str = r#"usage: weighd --model DIR [--url URL]... [options]
 
   --model DIR                 local checkpoint dir; tokenizer.json required,
                               tokenizer_config.json drives --template auto
@@ -1752,7 +1752,7 @@ fn default_workers() -> usize {
 /// Pinned to the version the Python package resolves (`pyproject.toml`): a mismatch is a
 /// correctness bug, because token-id parity is what makes the slot contract constructive.
 const TOKENIZERS_CRATE: &str = "0.23.2";
-const CLIENT_FLAVOUR: &str = "rust-semif-vllm serve";
+const CLIENT_FLAVOUR: &str = "rust-weighd serve";
 
 fn parse_serve_args(argv: &[String]) -> Result<Option<ServeArgs>, String> {
     let mut model = None;

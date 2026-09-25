@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! `semif-vllm`: SemIf's decision readout as an OpenAI-shaped HTTP service.
+//! `weighd`: SemIf's decision readout as an OpenAI-shaped HTTP service.
 //!
 //! This binary is one consumer of the `weigh` library. It owns SemIf's contract -- the
 //! `direct-options-v1` prompt, the criterion/evidence fold, and the `semif` response block --
@@ -24,7 +24,7 @@ mod serve;
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if let Err(error) = serve::run(&argv) {
-        eprintln!("semif-vllm: error: {}", error);
+        eprintln!("weighd: error: {}", error);
         std::process::exit(1);
     }
 }

@@ -6,17 +6,17 @@ attribute them — plus one consumer that serves a decision API on top of the re
 | Crate | Kind | What it is |
 |---|---|---|
 | [`weigh`](weigh) | library | Exact per-slot logprobs from an OpenAI-compatible server, with provenance. Renders no prompt and knows nothing about decision contracts |
-| [`semif-vllm`](semif-vllm) | binary | SemIf's `direct-options-v1` decision API over HTTP. Owns the prompt contract and the HTTP surface |
+| [`weighd`](weighd) | binary | SemIf's `direct-options-v1` decision API over HTTP. Owns the prompt contract and the HTTP surface |
 
 The split is an API boundary, not a rename. `weigh` never sees a "criterion", an
 "evidence" string, or a `direct-options-v1` prompt, and does not depend on the HTTP layer;
-`semif-vllm` owns no transport, no tokenizer and no softmax. If you want the readout, take the
+`weighd` owns no transport, no tokenizer and no softmax. If you want the readout, take the
 library; if you want the decision API, take the binary.
 
 ```bash
 cargo test --workspace                       # 93 tests, hermetic: no network, no GPU, no weights
 cargo build --workspace --release            # ~4.6 MB stripped binary
-cargo run -p semif-vllm --release -- --help
+cargo run -p weighd --release -- --help
 ```
 
 ## Why this exists
@@ -39,7 +39,7 @@ alternative — guessing — produces plausible numbers that mean something else
 
 ## Acknowledgements
 
-The `direct-options-v1` contract that `semif-vllm` implements, and the measurement discipline
+The `direct-options-v1` contract that `weighd` implements, and the measurement discipline
 these crates inherit, come from the **SemIf** project — an independent research effort on reading
 decisions out of a model's option logits. Thanks to it.
 

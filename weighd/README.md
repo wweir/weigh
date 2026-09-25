@@ -1,4 +1,4 @@
-# semif-vllm
+# weighd
 
 SemIf's decision API over HTTP: **one conditional answer-slot distribution per request**.
 
