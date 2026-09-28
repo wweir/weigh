@@ -2,23 +2,17 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Row validation, message construction, and gemma-4 chat-template rendering.
+//! Row validation, message construction, and prompt assembly.
 //!
-//! ## Why there is no Jinja engine here
-//!
-//! The gemma-4 `chat_template.jinja` is 17,336 bytes and references ~140 names, and
-//! the obvious Rust port (`minijinja`) **fails** on it: the template calls `.get(` 14
-//! times and minijinja does not implement that method
-//! (`unknown method: map has no method named get (in chat:238)`).
-//!
-//! But the served contract only ever sends one message shape -- a plain system message plus a
-//! plain user message, no tools, no image/audio/video -- so the reachable subgraph of the
-//! template is three lines. Rendering it directly was verified byte-identical to
-//! `transformers`' Jinja output on **777/777** fixture rows. `enable_thinking` was also
-//! verified to make no difference for this shape.
+//! The rendered wrapper is not this module's business: [`weigh::template`] owns the family
+//! registry -- and records why it is a registry rather than a Jinja engine -- while this module
+//! owns the *content*: the row that validates, the `{evidence, criterion, options}` JSON, and
+//! the option-to-letter binding. `prompt_version` here plus `prompt_template` there are what
+//! identify the string the server actually received.
 
 use serde_json::Value;
 use weigh::pyjson::Json;
+use weigh::schema::{MAX_VALUES, MIN_VALUES};
 use weigh::template::ChatTemplate;
 
 // The answer-slot model belongs to the library, which is where the token-id contract is
@@ -97,9 +91,12 @@ pub fn validate_row(value: &Value) -> Result<Row, String> {
 
     let option_values = object["options"]
         .as_array()
-        .ok_or_else(|| "options must contain 2-16 entries".to_string())?;
-    if option_values.len() < 2 || option_values.len() > LETTERS.len() {
-        return Err("options must contain 2-16 entries".to_string());
+        .ok_or_else(|| format!("options must contain {}-{} entries", MIN_VALUES, MAX_VALUES))?;
+    if option_values.len() < MIN_VALUES || option_values.len() > MAX_VALUES {
+        return Err(format!(
+            "options must contain {}-{} entries",
+            MIN_VALUES, MAX_VALUES
+        ));
     }
 
     let mut options = Vec::with_capacity(option_values.len());
@@ -140,7 +137,9 @@ pub fn to_json(value: &Value) -> Json {
     match value {
         Value::Null => Json::Null,
         Value::Bool(flag) => Json::Bool(*flag),
-        // `Number`'s own text is already exact, so integers bypass any range decision.
+        // A number that fit the JSON parser's i64/u64 range keeps its exact text; a magnitude
+        // beyond it was already an f64 before this module saw it, so either branch emits what
+        // `json.dumps(json.loads(...))` would.
         Value::Number(number) => match number.as_f64() {
             Some(float) if number.is_f64() => Json::Float(float),
             _ => Json::Raw(number.to_string()),
@@ -155,25 +154,29 @@ pub fn to_json(value: &Value) -> Json {
     }
 }
 
-/// Build the user message: `json.dumps(payload, ensure_ascii=False)` over the same
-/// three fields `core.direct_messages` emits, in the same order.
-pub fn user_message(row: &Row) -> Result<String, String> {
+/// The `direct-options-v1` user payload: `{evidence, criterion, options}`, in that order, with
+/// every option bound to its slot letter.
+///
+/// One builder for both paths, because the media payload is the same JSON with a different
+/// *evidence* source -- not a second contract.
+fn user_payload(
+    evidence: Json,
+    criterion: &str,
+    descriptions: &[String],
+) -> Result<String, String> {
     let payload = Json::Object(vec![
-        ("evidence".to_string(), to_json(&row.state)),
-        ("criterion".to_string(), Json::Str(row.question.clone())),
+        ("evidence".to_string(), evidence),
+        ("criterion".to_string(), Json::Str(criterion.to_string())),
         (
             "options".to_string(),
             Json::Array(
-                row.options
+                descriptions
                     .iter()
                     .zip(LETTERS.chars())
-                    .map(|(option, letter)| {
+                    .map(|(description, letter)| {
                         Json::Object(vec![
                             ("letter".to_string(), Json::Str(letter.to_string())),
-                            (
-                                "description".to_string(),
-                                Json::Str(option.description.clone()),
-                            ),
+                            ("description".to_string(), Json::Str(description.clone())),
                         ])
                     })
                     .collect(),
@@ -184,33 +187,24 @@ pub fn user_message(row: &Row) -> Result<String, String> {
     payload.dumps()
 }
 
-/// The text part of a media request: the same `{evidence, criterion, options}` JSON the text
-/// path sends, carrying the *text* evidence. The images become sibling content parts after it.
+/// Build the user message for one validated row.
+pub fn user_message(row: &Row) -> Result<String, String> {
+    let descriptions: Vec<String> = row
+        .options
+        .iter()
+        .map(|option| option.description.clone())
+        .collect();
+    user_payload(to_json(&row.state), &row.question, &descriptions)
+}
+
+/// The text part of a media request: the same payload the text path sends, carrying the *text*
+/// evidence. The images become sibling content parts after it.
 pub fn media_user_payload(
     evidence_text: &str,
     criterion: &str,
     option_ids: &[String],
 ) -> Result<String, String> {
-    let payload = Json::Object(vec![
-        ("evidence".to_string(), Json::Str(evidence_text.to_string())),
-        ("criterion".to_string(), Json::Str(criterion.to_string())),
-        (
-            "options".to_string(),
-            Json::Array(
-                option_ids
-                    .iter()
-                    .zip(LETTERS.chars())
-                    .map(|(label, letter)| {
-                        Json::Object(vec![
-                            ("letter".to_string(), Json::Str(letter.to_string())),
-                            ("description".to_string(), Json::Str(label.clone())),
-                        ])
-                    })
-                    .collect(),
-            ),
-        ),
-    ]);
-    payload.dumps()
+    user_payload(Json::Str(evidence_text.to_string()), criterion, option_ids)
 }
 
 /// Render the chat template for one system + user turn.

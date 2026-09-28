@@ -113,8 +113,8 @@ const READOUT_BUCKETS: [f64; 8] = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0
 /// Process-lifetime counters, exposed at `/metrics`.
 ///
 /// Deliberately small: every field is something an operator would act on. There is no
-/// per-route breakdown because this service has three routes, and no summary quantiles
-/// because these histogram buckets already support `histogram_quantile`.
+/// per-route breakdown because every route goes through the same readout path, and no summary
+/// quantiles because these histogram buckets already support `histogram_quantile`.
 #[derive(Default)]
 struct Metrics {
     requests: AtomicU64,
@@ -847,17 +847,7 @@ fn batch_completion(shared: &Shared, bytes: &[u8]) -> Reply {
             }));
             continue;
         }
-        let (status, content_type, body) = chat_completion(shared, item.to_string().as_bytes());
-        // Unreachable while the check above stands. Kept so that a future way of asking for
-        // SSE could not smuggle a `data:` body into a batch response.
-        if content_type == SSE {
-            let (status, body) = stream_in_batch_error();
-            results.push(json!({
-                "status": status,
-                "body": serde_json::from_str::<Value>(&body).unwrap_or(Value::Null),
-            }));
-            continue;
-        }
+        let (status, _, body) = chat_completion(shared, item.to_string().as_bytes());
         let value = serde_json::from_str(&body).unwrap_or(Value::String(body));
         results.push(json!({"status": status, "body": value}));
     }
@@ -3238,5 +3228,25 @@ mod tests {
         let health: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(health["prompt_template"], "gemma4");
         assert_eq!(health["prompt_template_source"], "default:no-chat-template");
+    }
+
+    /// `TOKENIZERS_CRATE` is a hand-written copy of the dependency version, which makes it the
+    /// one number in a response that can start lying: a consumer compares it against the
+    /// tokenizers build that produced a reference run, and token-id parity is the whole reason
+    /// the slot contract is constructive. Bump the constant with the dependency, or fail here.
+    #[test]
+    fn the_reported_tokenizers_version_is_the_locked_one() {
+        let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.lock"))
+            .expect("the workspace Cargo.lock");
+        let locked = lock
+            .split("name = \"tokenizers\"")
+            .nth(1)
+            .and_then(|rest| rest.split("version = \"").nth(1))
+            .and_then(|rest| rest.split('\"').next())
+            .expect("a tokenizers entry in Cargo.lock");
+        assert_eq!(
+            locked, TOKENIZERS_CRATE,
+            "bump TOKENIZERS_CRATE with the tokenizers dependency"
+        );
     }
 }
