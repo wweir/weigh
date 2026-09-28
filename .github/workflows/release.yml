@@ -190,6 +190,12 @@ jobs:
       # The only job that writes: it creates the Release and uploads the assets.
       contents: write
     steps:
+      # Kept at v8 deliberately, one major ahead of the upload above: `upload-artifact@v7`
+      # records a SHA-256 digest per artifact (its `artifact-digest` output) and this download
+      # verifies the bytes it received against that digest, failing by default on a mismatch
+      # (`digest-mismatch: error`). That is the only integrity check between Actions storage
+      # and the assets this workflow publishes -- SHA256SUMS below is computed *after* it, so it
+      # would faithfully checksum a corrupted download.
       - uses: actions/download-artifact@v8
         with:
           path: dist

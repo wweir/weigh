@@ -1,12 +1,14 @@
-# Build + test both crates. The suite is hermetic on purpose: every integration test starts a
-# fake inference server on 127.0.0.1 and points the real client at it, so CI needs no network,
-# no GPU, no model weights, and no secrets.
+# Build + test both crates, and hand out the binary that this run just proved. The suite is
+# hermetic on purpose: every integration test starts a fake inference server on 127.0.0.1 and
+# points the real client at it, so CI needs no network, no GPU, no model weights, and no secrets.
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+  # A manual run produces the binary for any branch without needing one pushed to main.
+  workflow_dispatch:
 
 # A newer push makes an in-flight run for the same ref uninteresting: cancel it and spend the
 # runner on the commit that is actually current.
@@ -14,8 +16,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# This workflow builds, tests and reads; it never writes to the repository. The release
-# workflow is the one that needs `contents: write`.
+# This workflow builds, tests, and uploads an artifact; it never writes to the repository. The
+# release workflow is the one that needs `contents: write` (artifacts go to Actions storage
+# under the run's own token).
 permissions:
   contents: read
 
@@ -67,7 +70,32 @@ jobs:
       - name: release build
         run: cargo build --workspace --release --locked
 
-      # Users run the optimised, stripped binary, not the test build. Prove it starts and prints
-      # its usage instead of merely proving that it links.
-      - name: the release binary runs
-        run: ./target/release/weighd --help
+      # The optimised, stripped binary is what a user runs, so it is both what CI proves and
+      # what CI hands out. Staged first and run from the staging directory: the artifact cannot
+      # leave here unproven, because a failure below stops before the upload.
+      - name: stage the distribution
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/weighd dist/weighd
+          # MPL-2.0 wants the licence text to travel with the binary; the release archive
+          # carries its own copy for the same reason.
+          cp LICENSE dist/LICENSE
+          (cd dist && sha256sum weighd > weighd.sha256 && cat weighd.sha256)
+
+      - name: the distributed binary runs
+        run: ./dist/weighd --help
+
+      - uses: actions/upload-artifact@v7
+        with:
+          # Attributable to the tree it was built from (for a pull_request run that is the merge
+          # commit this job tested). Fetch it with:
+          #   gh run download --name weighd-x86_64-unknown-linux-gnu-<sha>
+          name: weighd-x86_64-unknown-linux-gnu-${{ github.sha }}
+          # The directory's *contents*, so the artifact is `weighd`, `LICENSE`,
+          # `weighd.sha256` -- the same three things the release archive unpacks to.
+          path: dist/
+          if-no-files-found: error
+          # A development artifact, not a release: long enough to fetch after a review, short
+          # enough not to accumulate.
+          retention-days: 14
