@@ -142,12 +142,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux images are pinned, not `-latest`: the glibc the binary links against on the
-          # build image becomes the floor every consumer has to meet, so it has to be a
-          # decision. `ubuntu-latest` is Ubuntu 24.04 today and migrates to Ubuntu 26 on
-          # 2026-10-19 (actions/runner-images#14748), which would have raised that floor
-          # silently on whatever tag came after. ci.yml stays on `-latest` on purpose, as the
-          # canary that tells us when the pinned image has fallen behind.
+          # Linux images are pinned, not `-latest`: what a build links against becomes a floor
+          # every consumer has to meet, and that floor must not move as a side effect of a
+          # runner-image rollout. Measured today, the x86_64 archive requires GLIBC_2.34
+          # (`readelf --version-info weighd | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1`),
+          # which is what makes "not newer than that without meaning to" a check rather than a
+          # hope -- note that is well below the image's own glibc, so the pin buys headroom
+          # rather than following it. `ubuntu-latest` is Ubuntu 24.04 today and migrates to
+          # Ubuntu 26 on 2026-10-19 (actions/runner-images#14748), i.e. the name would have
+          # changed under us. ci.yml stays on `-latest` on purpose, as the canary for when this
+          # pin has fallen behind.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
             expect: 'ELF 64-bit.*x86-64'
