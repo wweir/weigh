@@ -102,8 +102,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux images are pinned, not `-latest`: the glibc the binary links against on the
+          # build image becomes the floor every consumer has to meet, so it has to be a
+          # decision. `ubuntu-latest` is Ubuntu 24.04 today and migrates to Ubuntu 26 on
+          # 2026-10-19 (actions/runner-images#14748), which would have raised that floor
+          # silently on whatever tag came after. ci.yml stays on `-latest` on purpose, as the
+          # canary that tells us when the pinned image has fallen behind.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             expect: 'ELF 64-bit.*x86-64'
             run: 'true'
           - target: aarch64-unknown-linux-gnu
@@ -111,14 +117,17 @@ jobs:
             expect: 'ELF 64-bit.*aarch64'
             run: 'true'
           - target: aarch64-apple-darwin
-            os: macos-latest
+            # Pinned for the same reason as the Linux images: the SDK on the build image sets
+            # the minimum macOS the binary will run on. `macos-latest` is macOS 26 (arm64)
+            # today, so this is that same image by name.
+            os: macos-26
             expect: 'Mach-O 64-bit.*arm64'
             run: 'true'
           - target: x86_64-apple-darwin
             # Cross-built on the arm64 macOS runner: Apple's clang targets both architectures
-            # from one SDK. Not executed here (that would need Rosetta), so its architecture is
-            # asserted from the artifact itself instead.
-            os: macos-latest
+            # from one SDK. Not executed here (that would need Rosetta, and the x64 images are
+            # larger-runner labels), so its architecture is asserted from the artifact itself.
+            os: macos-26
             expect: 'Mach-O 64-bit.*x86_64'
             run: 'false'
     runs-on: ${{ matrix.os }}
