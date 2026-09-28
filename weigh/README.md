@@ -14,34 +14,41 @@ and get a subset softmax over them plus the provenance to attribute the number.
 use std::time::Duration;
 use weigh::{BackendChoice, Client, Config, MediaPolicy, Readout, TemplateChoice};
 
-let (client, metadata) = Client::new(&Config {
-    urls: vec!["http://127.0.0.1:8000".to_string()],
-    backend: BackendChoice::Auto,
-    readout: Readout::ExactSlot,
-    template: TemplateChoice::Auto,
-    timeout: Duration::from_secs(120),
-    max_tokens: usize::MAX,                  // tightened to `max_model_len - 1`
-    source: "/models/Qwen3-8B".to_string(),  // a directory containing `tokenizer.json`
-    allow_tokenizer_mismatch: false,
-    media: MediaPolicy::Off,
-})?;
+fn score(model: &str, url: &str) -> Result<(), String> {
+    let (client, metadata) = Client::new(&Config {
+        urls: vec![url.to_string()],
+        backend: BackendChoice::Auto,
+        readout: Readout::ExactSlot,
+        template: TemplateChoice::Auto,
+        timeout: Duration::from_secs(120),
+        max_tokens: usize::MAX,             // tightened to `max_model_len - 1`
+        source: model.to_string(),          // a directory containing `tokenizer.json`
+        allow_tokenizer_mismatch: false,
+        media: MediaPolicy::Off,
+    })?;
+    eprintln!("backend={} template={}", metadata.backend.as_str(), metadata.prompt_template.as_str());
 
-// The caller renders the prompt: this library renders no chat template.
-let options = vec!["negative".to_string(), "positive".to_string()];
-let prepared = client.prepare("row-1", "…the finished prompt…", &options)?;
-// `fetch_any` has its own error type: it carries whether the budget ran out, which is the one
-// backend failure a caller may reasonably retry.
-let (scored, endpoint) = client.fetch_any(&prepared).map_err(|error| error.to_string())?;
+    // The caller renders the prompt: this library renders no chat template.
+    let options = vec!["negative".to_string(), "positive".to_string()];
+    let prepared = client.prepare("row-1", "…the finished prompt…", &options)?;
+    // `fetch_any` has its own error type: it carries whether the budget ran out, which is the
+    // one backend failure a caller may reasonably retry.
+    let (scored, endpoint) = client.fetch_any(&prepared).map_err(|error| error.to_string())?;
 
-// `scored.probabilities[i]` is the conditional score of `options[i]`, normalized over the
-// declared slots. It is not calibrated decision confidence, and the crate never says it is.
-for (label, probability) in scored.option_ids.iter().zip(&scored.probabilities) {
-    println!("{label}: {probability}");
+    // `scored.probabilities[i]` is the conditional score of `options[i]`, normalized over the
+    // declared slots. It is not calibrated decision confidence, and the crate never says it is.
+    for (label, probability) in scored.option_ids.iter().zip(&scored.probabilities) {
+        println!("{label}: {probability}");
+    }
+    // Provenance travels with the number, not in a separate log.
+    println!("endpoint={endpoint} readout={}", scored.readout);
+    Ok(())
 }
 ```
 
-That is the whole loop. `examples/score_slots.rs` is the same code as a compilable target, so it
-cannot drift from the documented API.
+That is the whole loop. The snippet is this crate's doc test — `cargo test` compiles it, so it
+cannot drift from the documented API. It scores nothing on its own: `score` is shown here, not
+called, because a readout needs a live server and a real tokenizer directory.
 
 ## Why name the slots instead of reading `top_logprobs`
 
@@ -86,8 +93,11 @@ and `esaxx-rs` through its default features.
 
 ```bash
 cargo test                 # hermetic: starts fake servers on 127.0.0.1, needs no network
-cargo run --example score_slots   # needs a real server and a tokenizer directory
 ```
+
+For a live end-to-end check against a real vLLM or SGLang deployment, run the `weighd` binary
+against it: that path probes the backend through this library and answers over HTTP, which is a
+stronger check than a one-shot readout.
 
 ## Limitations, stated rather than discovered
 
