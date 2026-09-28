@@ -10,14 +10,15 @@
 //! several readouts and a cross-field consistency rule this server does not implement,
 //! and a multi-type field would span heterogeneous tokenizations.
 //!
-//! Accepted shapes:
+//! Accepted shapes, exactly one per request:
 //!
 //! ```json
 //! "response_format": {"type": "json_schema", "json_schema": {"schema": { ... }}}
 //! ```
 //!
-//! or a top-level `"schema": { ... }`. Sending both is an error rather than a silent
-//! preference.
+//! or a top-level `"schema": { ... }`, or `"guided_json": { ... }` (vLLM/SGLang's own
+//! key, which [`DecisionSchema::from_request`] reads). More than one of them is an error
+//! rather than a silent preference.
 
 use serde_json::{Map, Value};
 

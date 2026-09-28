@@ -13,8 +13,7 @@
 //!
 //! Built with `allow_nan=False` semantics, and with `ensure_ascii=False` like the Python
 //! client's prompt payload: non-ASCII evidence stays in the payload as written, because the
-//! payload is a UTF-8 HTTP body. `json.dumps`'s `ensure_ascii=True` default belonged to the
-//! batch JSONL writer, which went away with the batch CLI.
+//! payload is a UTF-8 HTTP body.
 
 use std::fmt::Write as _;
 
@@ -64,7 +63,7 @@ fn digits_and_decpt(text: &str) -> Option<(String, i32)> {
 ///
 /// Returns `None` for NaN and infinities: the caller passes `allow_nan=False`, which
 /// makes Python raise, so emitting them here would be silently wrong.
-pub fn py_float(value: f64) -> Option<String> {
+fn py_float(value: f64) -> Option<String> {
     if !value.is_finite() {
         return None;
     }

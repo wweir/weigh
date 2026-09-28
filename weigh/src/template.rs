@@ -100,12 +100,11 @@ impl ChatTemplate {
     }
 
     /// Which family a `chat_template` string belongs to, by distinctive marker.
+    ///
+    /// `None` for both "a shape this crate does not know" and "a shape it knows it must not
+    /// render"; `unrenderable_reason` tells the two apart for a caller that needs to say why.
     pub fn detect(chat_template: &str) -> Option<Self> {
-        // A template that raises for the system role cannot be served faithfully here --
-        // the service always sends one -- and gemma-2 does exactly that while sharing gemma-3's
-        // `<start_of_turn>` marker. Refusing to detect it is what keeps `auto` from folding
-        // the system turn into the user turn on a model whose own template refuses to.
-        if chat_template.contains("System role not supported") {
+        if unrenderable_reason(chat_template).is_some() {
             return None;
         }
         // Order matters only in that these markers are mutually exclusive in practice; the
@@ -134,14 +133,9 @@ impl ChatTemplate {
             return Some(ChatTemplate::Llama2);
         }
         if chat_template.contains("[INST]") {
-            // Mistral v0.1/v0.2 write the tag as `' [INST] '`/`' [/INST]'` -- a space on
-            // both sides; v0.3 writes `"[INST] "`/`"[/INST]"`. Only the v0.1/v0.2 bytes are
-            // rendered here, so a v0.3-shaped template is refused rather than rendered with
-            // the wrong spacing.
-            if chat_template.contains(" [INST]") && chat_template.contains(" [/INST]") {
-                return Some(ChatTemplate::Mistral);
-            }
-            return None;
+            // Only the v0.1/v0.2 bytes are rendered here; every other `[INST]` shape was
+            // already refused above.
+            return Some(ChatTemplate::Mistral);
         }
         None
     }
@@ -215,6 +209,30 @@ impl ChatTemplate {
     }
 }
 
+/// Why a `chat_template` this crate *recognises* is still not rendered.
+///
+/// Distinct from an unknown shape, and consulted by both [`ChatTemplate::detect`] (which
+/// refuses either way) and [`resolve`] -- where it must also refuse the shape when the
+/// operator named a family explicitly, since that family's bytes are exactly what is wrong.
+fn unrenderable_reason(chat_template: &str) -> Option<&'static str> {
+    // A template that raises for the system role cannot be served faithfully here -- the
+    // service always sends one -- and gemma-2 does exactly that while sharing gemma-3's
+    // `<start_of_turn>` marker. Refusing keeps `auto` from folding the system turn into the
+    // user turn on a model whose own template refuses to.
+    if chat_template.contains("System role not supported") {
+        return Some("it raises for the system role (gemma-2), and this service always sends one");
+    }
+    // Mistral v0.1/v0.2 write the tag as `' [INST] '`/`' [/INST]'` -- a space on both sides;
+    // v0.3 writes `"[INST] "`/`"[/INST]"`. Only the v0.1/v0.2 bytes are rendered here, so a
+    // v0.3-shaped template is refused rather than rendered with the wrong spacing.
+    if chat_template.contains("[INST]")
+        && !(chat_template.contains(" [INST]") && chat_template.contains(" [/INST]"))
+    {
+        return Some("its [INST] spacing is Mistral v0.3's, and only v0.1/v0.2 bytes are rendered");
+    }
+    None
+}
+
 /// What the operator asked for on the command line.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TemplateChoice {
@@ -249,6 +267,17 @@ pub fn resolve(choice: TemplateChoice, model_dir: &str) -> Result<Resolved, Stri
                 .map_err(|error| format!("{} is not valid JSON: {}", path_text, error))?;
             let templates = extract_chat_templates(&value);
             if templates.is_empty() {
+                // A *present* `chat_template` this build cannot read is not the same as an
+                // absent one: falling back to the default wrapper would score under a
+                // template the checkpoint never declared.
+                if value.get("chat_template").is_some() {
+                    return Err(format!(
+                        "{} declares a `chat_template` that is neither a string nor an array of \
+                         strings/objects with a `template` key; refusing to fall back to the \
+                         default wrapper.",
+                        path_text
+                    ));
+                }
                 None
             } else {
                 Some(templates)
@@ -277,6 +306,22 @@ pub fn resolve(choice: TemplateChoice, model_dir: &str) -> Result<Resolved, Stri
                         other.as_str()
                     ));
                 }
+            } else if let Some(reason) = declared
+                .as_ref()
+                .and_then(|templates| templates.iter().find_map(|text| unrenderable_reason(text)))
+            {
+                // The operator named a family, but this file declares a shape that build
+                // deliberately does not render -- and that shape shares the named family's
+                // marker, so honouring the name would render exactly the bytes the refusal
+                // exists to prevent.
+                return Err(format!(
+                    "--template {} was requested, but {} declares a chat_template this build \
+                     will not render: {}. Point --model at a checkpoint whose template can be \
+                     reproduced byte for byte.",
+                    template.as_str(),
+                    path_text,
+                    reason
+                ));
             }
             Ok(Resolved {
                 template,
@@ -291,12 +336,20 @@ pub fn resolve(choice: TemplateChoice, model_dir: &str) -> Result<Resolved, Stri
             None => {
                 if let Some(templates) = declared {
                     let head: String = templates[0].chars().take(200).collect();
+                    // Say *why* a recognised shape was refused, not just that it matched
+                    // nothing: the fix differs (a different checkpoint vs a different flag).
+                    let reason = templates
+                        .iter()
+                        .find_map(|text| unrenderable_reason(text))
+                        .map(|reason| format!(": {}", reason))
+                        .unwrap_or_default();
                     return Err(format!(
-                        "{} declares a chat_template, but it matches no supported family ({}). \
+                        "{} declares a chat_template that matches no supported family ({}){}. \
                          Refusing to guess rather than render a wrapper the model was not trained \
                          on. Template head: {:?}",
                         path_text,
                         NAMES.join(", "),
+                        reason,
                         head
                     ));
                 }
@@ -422,25 +475,6 @@ mod tests {
         assert_eq!(ChatTemplate::detect("{{ messages[0]['content'] }}"), None);
     }
 
-    /// The two shapes whose own template differs from the family marker they share. Both are
-    /// refusals on purpose: rendering the marker's bytes would produce a plausible prompt the
-    /// model was never trained on, and the boundary check only validates the last token.
-    #[test]
-    fn auto_refuses_the_shapes_it_cannot_render_byte_for_byte() {
-        // gemma-2 shares gemma-3's marker but raises for a system role.
-        assert_eq!(
-            ChatTemplate::detect(
-                "{{ '<start_of_turn>user' }}{{ raise_exception('System role not supported') }}"
-            ),
-            None
-        );
-        // Mistral v0.3 moved the spaces: `"[INST] " ... "[/INST]"`.
-        assert_eq!(
-            ChatTemplate::detect("{{ \"[INST] \" + content + \"[/INST]\" }}"),
-            None
-        );
-    }
-
     /// The exact bytes the real templates produce, for the families that were rendered
     /// wrongly before: both were verified against the models' own `tokenizer_config.json`.
     #[test]
@@ -477,25 +511,6 @@ mod tests {
         assert!(TemplateChoice::parse("nope").is_err());
     }
 
-    #[test]
-    fn chat_templates_are_extracted_from_both_encodings() {
-        let single = json!({"chat_template": "<|im_start|>system"});
-        assert_eq!(
-            extract_chat_templates(&single),
-            vec!["<|im_start|>system".to_string()]
-        );
-        let listed = json!({"chat_template": [
-            {"name": "default", "template": "<|turn>x"},
-            {"name": "tool_use", "template": "other"}
-        ]});
-        // All declared templates are extracted; detection takes the first that matches.
-        assert_eq!(
-            extract_chat_templates(&listed),
-            vec!["<|turn>x".to_string(), "other".to_string()]
-        );
-        assert!(extract_chat_templates(&json!({})).is_empty());
-    }
-
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let directory =
             std::env::temp_dir().join(format!("semif-template-{}-{}", std::process::id(), name));
@@ -504,67 +519,103 @@ mod tests {
         directory
     }
 
+    /// One table for the whole decision: what the file declares, what the operator asked for,
+    /// and which of the two wins. Every row has the same shape -- a temp dir, at most one
+    /// `tokenizer_config.json`, one outcome -- so the rows are data, not five copies of a test.
     #[test]
-    fn auto_without_a_config_defaults_to_gemma4_and_says_so() {
-        let directory = temp_dir("auto-default");
-        let resolved = resolve(TemplateChoice::Auto, directory.to_str().unwrap()).unwrap();
-        assert_eq!(resolved.template, ChatTemplate::Gemma4);
-        assert_eq!(resolved.source, "default:no-chat-template");
-    }
-
-    #[test]
-    fn auto_uses_the_declared_family() {
-        let directory = temp_dir("auto-chatml");
-        std::fs::write(
-            directory.join("tokenizer_config.json"),
-            json!({"chat_template": "{{ '<|im_start|>system' }}"}).to_string(),
-        )
-        .unwrap();
-        let resolved = resolve(TemplateChoice::Auto, directory.to_str().unwrap()).unwrap();
-        assert_eq!(resolved.template, ChatTemplate::Chatml);
-        assert!(
-            resolved.source.starts_with("detected:"),
-            "{}",
-            resolved.source
-        );
-    }
-
-    #[test]
-    fn auto_refuses_an_unrecognized_chat_template() {
-        let directory = temp_dir("auto-unknown");
-        std::fs::write(
-            directory.join("tokenizer_config.json"),
-            json!({"chat_template": "{{ weird }}"}).to_string(),
-        )
-        .unwrap();
-        let error = resolve(TemplateChoice::Auto, directory.to_str().unwrap()).unwrap_err();
-        assert!(error.contains("matches no supported family"), "{}", error);
-    }
-
-    #[test]
-    fn an_explicit_template_that_contradicts_detection_is_refused() {
-        let directory = temp_dir("explicit-mismatch");
-        std::fs::write(
-            directory.join("tokenizer_config.json"),
-            json!({"chat_template": "{{ '<|im_start|>system' }}"}).to_string(),
-        )
-        .unwrap();
-        let error = resolve(
-            TemplateChoice::Fixed(ChatTemplate::Gemma4),
-            directory.to_str().unwrap(),
-        )
-        .unwrap_err();
-        assert!(
-            error.contains("describes a chatml chat template"),
-            "{}",
-            error
-        );
-        // The matching explicit choice is accepted.
-        let resolved = resolve(
-            TemplateChoice::Fixed(ChatTemplate::Chatml),
-            directory.to_str().unwrap(),
-        )
-        .unwrap();
-        assert_eq!(resolved.source, "explicit");
+    fn resolve_matches_the_declared_file_against_the_operator_choice() {
+        // The two shapes this crate recognises and still refuses: they share a family's marker
+        // and render different bytes.
+        let gemma2 =
+            "{{ '<start_of_turn>user' }}{{ raise_exception('System role not supported') }}";
+        let mistral_v3 = "{{ \"[INST] \" + content + \"[/INST]\" }}";
+        let cases = [
+            (
+                "nothing declared",
+                None,
+                TemplateChoice::Auto,
+                Ok((ChatTemplate::Gemma4, "default:no-chat-template")),
+            ),
+            // The array encoding some checkpoints ship, and the family it declares.
+            (
+                "declared, array encoding",
+                Some(
+                    json!({"chat_template": [{"name": "default", "template": "{{ '<|im_start|>system' }}"}]}),
+                ),
+                TemplateChoice::Auto,
+                Ok((ChatTemplate::Chatml, "detected:")),
+            ),
+            // An explicit choice that agrees with the file is kept, and says it was explicit.
+            (
+                "explicit agreement",
+                Some(json!({"chat_template": "{{ ' [INST] ' + x + ' [/INST]' }}"})),
+                TemplateChoice::Fixed(ChatTemplate::Mistral),
+                Ok((ChatTemplate::Mistral, "explicit")),
+            ),
+            (
+                "nothing matches",
+                Some(json!({"chat_template": "{{ weird }}"})),
+                TemplateChoice::Auto,
+                Err("matches no supported family"),
+            ),
+            (
+                "present but unreadable",
+                Some(json!({"chat_template": [{"name": "default"}]})),
+                TemplateChoice::Auto,
+                Err("neither a string nor an array"),
+            ),
+            (
+                "explicit contradicts the file",
+                Some(json!({"chat_template": "{{ '<|im_start|>system' }}"})),
+                TemplateChoice::Fixed(ChatTemplate::Gemma4),
+                Err("describes a chatml chat template"),
+            ),
+            (
+                "gemma-2 refuses the system role",
+                Some(json!({"chat_template": gemma2})),
+                TemplateChoice::Auto,
+                Err("system role"),
+            ),
+            // Naming the family it shares a marker with must not force it through.
+            (
+                "gemma-2, named anyway",
+                Some(json!({"chat_template": gemma2})),
+                TemplateChoice::Fixed(ChatTemplate::Gemma3),
+                Err("system role"),
+            ),
+            (
+                "mistral v0.3 spacing, named as v0.1/v0.2",
+                Some(json!({"chat_template": mistral_v3})),
+                TemplateChoice::Fixed(ChatTemplate::Mistral),
+                Err("spacing"),
+            ),
+        ];
+        for (index, (name, config, choice, expected)) in cases.iter().enumerate() {
+            let directory = temp_dir(&format!("resolve-{}", index));
+            if let Some(config) = config {
+                std::fs::write(directory.join("tokenizer_config.json"), config.to_string())
+                    .unwrap();
+            }
+            match (resolve(*choice, directory.to_str().unwrap()), expected) {
+                (Ok(resolved), Ok((template, source))) => {
+                    assert_eq!(resolved.template, *template, "{}", name);
+                    assert!(
+                        resolved.source.starts_with(source),
+                        "{}: {}",
+                        name,
+                        resolved.source
+                    );
+                }
+                (Err(error), Err(fragment)) => {
+                    assert!(error.contains(fragment), "{}: {}", name, error)
+                }
+                (resolved, expected) => panic!(
+                    "{}: resolved to {:?}, expected {:?}",
+                    name,
+                    resolved.map(|resolved| resolved.template),
+                    expected
+                ),
+            }
+        }
     }
 }

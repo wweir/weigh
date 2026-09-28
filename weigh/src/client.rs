@@ -2,16 +2,30 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The vLLM scoring client: prompt encoding, the answer-boundary check, the HTTP
+//! The vLLM/SGLang scoring client: prompt encoding, the answer-boundary check, the HTTP
 //! readout, and the subset softmax.
 //!
-//! The deployed build's behaviour, measured rather than assumed:
-//! the deployed build (vLLM 0.23.0) accepts pre-tokenized prompts on
-//! `/v1/completions`, ignores `logprob_token_ids` there and rejects `logprobs` above
-//! 20, and returns `top_logprobs` keyed by *decoded string* -- so option slots are
-//! matched by the text their token decodes to. A slot outside the returned top-N is
-//! recovered through `/generative_scoring`, which has no top-N cap but returns
-//! probabilities already normalized over the supplied subset.
+//! Three text readouts, decided once at startup and recorded in the artifact rather than
+//! re-decided per row:
+//!
+//! * **vLLM exact-slot** (`logprob_token_ids` + `return_tokens_as_token_ids`): the declared
+//!   slots are named by token id and come back under `token_id:<id>` keys, so no slot can miss
+//!   a top-N and there is nothing to recover. This is what `Readout::ExactSlot` requires, and
+//!   [`Client::new`] refuses that readout when the build cannot prove it.
+//! * **vLLM top-N** (`Readout::TopN`, for a build that ignores `logprob_token_ids`):
+//!   `/v1/completions` returns `top_logprobs` keyed by *decoded string*, so option slots are
+//!   matched by the text their token decodes to, and a slot outside the returned top-N is
+//!   recovered through `/generative_scoring`, which has no top-N cap but returns probabilities
+//!   already normalized over the supplied subset. Measured on the build this path was written
+//!   for (vLLM 0.23.0): pre-tokenized prompts are accepted, `logprobs` above 20 is a hard HTTP
+//!   400, and that recovery rate rises with load (0.1% -> 97.9%) -- which is why numbers from
+//!   the two readouts must never be pooled.
+//! * **SGLang exact-slot** (native `/generate` + `token_ids_logprob`): slots named by token id,
+//!   no top-N dependence, no fallback.
+//!
+//! An image moves the row to the chat route instead (see [`crate::media`]): the backend's own
+//! processor tokenizes the prompt, so the boundary proof does not apply, and the response says
+//! so rather than implying an `input_ids_sha256` it never had.
 //!
 //! ## Serving across several vLLM endpoints
 //!
@@ -1474,9 +1488,6 @@ pub struct Client {
     /// What every endpoint can do with an image. Decided once at startup by the probe, so a
     /// media request is never re-decided per row.
     media: MediaSupport,
-    /// The resolved chat wrapper. Rendering a wrapper the model was not trained on
-    /// yields plausible but wrong probabilities, so this is fixed at startup.
-    template: ChatTemplate,
 }
 
 impl Client {
@@ -1693,7 +1704,6 @@ impl Client {
             boundary: Mutex::new(HashSet::new()),
             slot_cache: Mutex::new(HashMap::new()),
             media: media_support.unwrap_or(MediaSupport::None),
-            template: resolved_template.template,
         };
         Ok((
             client,
@@ -1733,16 +1743,6 @@ impl Client {
         Ok(result)
     }
 
-    /// The chat wrapper this model's own `tokenizer_config.json` declares, or the historical
-    /// default when it declares none.
-    ///
-    /// The library renders no prompt, but a caller that does has to know which wrapper it is:
-    /// the wrapper plus the caller's own prompt content is what identifies the string the
-    /// server receives, and therefore what makes a result reproducible later.
-    pub fn template(&self) -> ChatTemplate {
-        self.template
-    }
-
     /// Prepare a text readout: tokenize the caller's prompt, prove the answer boundary, and
     /// bind every option to one slot token.
     ///
@@ -1765,7 +1765,10 @@ impl Client {
         // and which one happens is the server's policy, not ours. One token is reserved for the
         // single scored position, since every readout sends `max_tokens: 1`.
         let limit = context_limit_for(self.max_tokens, self.context_limit);
-        if ids.is_empty() || ids.len() > limit {
+        if ids.is_empty() {
+            return Err(format!("{}: prompt tokenizes to zero tokens", row_id));
+        }
+        if ids.len() > limit {
             return Err(format!(
                 "{}: {} input tokens exceed limit {}; no truncation allowed",
                 row_id,

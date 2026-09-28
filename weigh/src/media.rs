@@ -70,15 +70,12 @@ impl Default for MediaLimits {
 /// One image the caller attached to the evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Media {
-    pub kind: &'static str,
     pub mime: String,
     /// sha256 of the decoded bytes. `None` for a remote URL this server never fetched --
     /// the fingerprint would be of the URL, not of what the backend actually loads.
     pub sha256: Option<String>,
     /// Decoded size in bytes. `None` for a remote URL.
     pub size: Option<usize>,
-    /// Present only for a remote URL (which requires `--allow-remote-media`).
-    pub url: Option<String>,
     /// The exact `image_url.url` string handed to the backend, byte for byte. This is the
     /// only field the readout reads when it builds the backend request: the decode above is
     /// evidence about the bytes, never a source for them.
@@ -96,13 +93,17 @@ impl Media {
     }
 
     /// The provenance object recorded in a response.
+    ///
+    /// `kind` is emitted as a constant because this crate produces one kind of media, and the
+    /// URL is restated from the reference exactly when there is no local fingerprint -- a
+    /// remote URL is the only case that hashes nothing, so the two cannot disagree.
     pub fn provenance(&self) -> Value {
         json!({
-            "kind": self.kind,
+            "kind": "image",
             "mime": self.mime,
             "bytes": self.size,
             "sha256": self.sha256,
-            "url": self.url,
+            "url": self.sha256.is_none().then_some(self.reference.as_str()),
         })
     }
 }
@@ -288,11 +289,9 @@ fn read_image(
             ));
         }
         return Ok(Media {
-            kind: "image",
             mime: "unknown".to_string(),
             sha256: None,
             size: None,
-            url: Some(url.to_string()),
             reference: url.to_string(),
         });
     }
@@ -389,11 +388,9 @@ fn decode_data_uri(
     // `reference` is the caller's string verbatim; the decoded `bytes` are dropped after
     // being fingerprinted. Pass-through is what reaches the backend.
     Ok(Media {
-        kind: "image",
         mime,
         sha256: Some(sha256_hex(&bytes)),
         size: Some(bytes.len()),
-        url: None,
         reference: url.to_string(),
     })
 }
@@ -423,18 +420,10 @@ mod tests {
         }
     }
 
+    /// The probe image, reused so the test's idea of a valid PNG cannot drift from the one
+    /// the startup probe sends.
     fn png_data_uri() -> String {
-        // 1x1 transparent PNG.
-        format!(
-            "data:image/png;base64,{}",
-            BASE64.encode([
-                0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
-                0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00,
-                0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54,
-                0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4,
-                0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-            ])
-        )
+        PROBE_IMAGE_DATA_URI.to_string()
     }
 
     #[test]
@@ -461,7 +450,7 @@ mod tests {
             image.sha256.as_deref().unwrap(),
             "ebf4f635a17d10d6eb46ba680b70142419aa3220f228001a036d311a22ee9d2a"
         );
-        assert!(image.url.is_none());
+        assert_eq!(image.provenance()["url"], json!(null));
     }
 
     #[test]
@@ -485,8 +474,8 @@ mod tests {
         assert_eq!(content.media[0].sha256, None);
         assert_eq!(content.media[0].size, None);
         assert_eq!(
-            content.media[0].url.as_deref(),
-            Some("https://example.invalid/x.png")
+            content.media[0].provenance()["url"],
+            json!("https://example.invalid/x.png")
         );
     }
 
@@ -500,14 +489,18 @@ mod tests {
     }
 
     #[test]
-    fn a_filesystem_path_is_refused() {
-        let message = json!({"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": "file:///etc/passwd"}},
-        ]});
-        assert_eq!(
-            read_content(&message, 0, &limits()).unwrap_err().0,
-            "invalid_media"
-        );
+    fn a_reference_that_is_neither_a_data_uri_nor_http_is_refused() {
+        for (reference, expected) in [
+            ("file:///etc/passwd", "filesystem path"),
+            ("data:image/png,notbase64", "base64"),
+        ] {
+            let message = json!({"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": reference}},
+            ]});
+            let error = read_content(&message, 0, &limits()).unwrap_err();
+            assert_eq!(error.0, "invalid_media", "{}", error.1);
+            assert!(error.1.contains(expected), "{}", error.1);
+        }
     }
 
     #[test]
@@ -538,17 +531,6 @@ mod tests {
     }
 
     #[test]
-    fn a_non_base64_data_uri_is_refused() {
-        let message = json!({"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": "data:image/png,notbase64"}},
-        ]});
-        assert_eq!(
-            read_content(&message, 0, &limits()).unwrap_err().0,
-            "invalid_media"
-        );
-    }
-
-    #[test]
     fn an_oversized_image_is_refused_before_allocation_spreads() {
         let mut small = limits();
         small.max_media_bytes = 8;
@@ -576,30 +558,33 @@ mod tests {
     }
 
     #[test]
-    fn a_part_without_a_type_is_still_refused_by_its_index() {
-        let message = json!({"role": "user", "content": [{"text": "orphan"}]});
-        let error = read_content(&message, 2, &limits()).unwrap_err();
-        assert_eq!(error.0, "unsupported_content_part");
-        assert!(error.1.contains("messages[2]"), "{}", error.1);
-    }
-
-    #[test]
-    fn a_text_part_without_a_string_text_is_refused_rather_than_dropped() {
-        let message = json!({"role": "user", "content": [{"type": "text", "text": 42}]});
-        let error = read_content(&message, 0, &limits()).unwrap_err();
-        assert_eq!(error.0, "unsupported_content_part");
-        assert!(error.1.contains("missing or not a string"), "{}", error.1);
-    }
-
-    #[test]
-    fn an_image_url_key_other_than_url_is_refused_rather_than_ignored() {
-        // `detail` (and anything else OpenAI defines there) selects how the backend renders
-        // the image, so dropping it would change the tokens the model sees.
-        let message = json!({"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": png_data_uri(), "detail": "high"}}]});
-        let error = read_content(&message, 0, &limits()).unwrap_err();
-        assert_eq!(error.0, "unsupported_content_part");
-        assert!(error.1.contains("detail"), "{}", error.1);
+    fn a_part_this_server_cannot_read_is_refused_by_index_and_named() {
+        // Refused rather than dropped, at every shape: skipping a part would answer a
+        // question the caller did not ask, with nothing in the response saying so.
+        let cases = [
+            (json!([{"text": "orphan"}]), 2, "no \"type\""),
+            (
+                json!([{"type": "text", "text": 42}]),
+                0,
+                "missing or not a string",
+            ),
+            (
+                json!([{"type": "image_url", "image_url": {"url": png_data_uri(), "detail": "high"}}]),
+                0,
+                "detail",
+            ),
+        ];
+        for (content, index, expected) in cases {
+            let message = json!({"role": "user", "content": content});
+            let error = read_content(&message, index, &limits()).unwrap_err();
+            assert_eq!(error.0, "unsupported_content_part", "{}", error.1);
+            assert!(
+                error.1.contains(&format!("messages[{}]", index)),
+                "{}",
+                error.1
+            );
+            assert!(error.1.contains(expected), "{}", error.1);
+        }
     }
 
     #[test]
