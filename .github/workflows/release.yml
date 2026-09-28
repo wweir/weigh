@@ -1,9 +1,15 @@
-# Cut a release: build `weighd` for every supported platform, then attach the archives and a
-# checksum file to a GitHub Release.
+# Cut a release: build `weighd` for every supported platform, assemble the archives with a
+# checksum file, and -- when this is a release run -- attach them to a GitHub Release.
 #
-# Triggered by a version tag (`v0.1.0`). `workflow_dispatch` runs the identical pipeline against
-# an existing tag but publishes nothing unless `publish` is checked, so the release machinery can
-# be rehearsed without shipping.
+# Two ways in:
+#
+#   * push a version tag (`v0.1.0`): the release path. The tag must agree with both manifests
+#     and sit on main, and the assembled assets are published.
+#   * `workflow_dispatch` (which defaults to `rehearse: true`): the *same* matrix and the *same*
+#     packaging from the dispatched commit, with no tag and nothing published. The assembled
+#     bundle is uploaded as a workflow artifact, so a rehearsal is inspectable and the macOS
+#     cross-builds and pinned runner labels are exercised here rather than on the tag that
+#     matters. `rehearse: false` plus `tag` is the path for re-publishing an existing tag.
 #
 # What is deliberately NOT built here, and why:
 #   * Windows -- `weighd` registers SIGTERM/SIGINT through `signal-hook`, and while that crate
@@ -19,14 +25,15 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      tag:
-        description: Existing tag to build, e.g. v0.1.0
-        required: true
-      publish:
-        description: Create the GitHub Release (unchecked = build and smoke-test only)
+      rehearse:
+        description: Build and assemble from this ref, publishing nothing (no tag needed)
         type: boolean
-        default: false
+        default: true
+      tag:
+        description: Existing tag to publish; only read when rehearse is false
+        required: false
 
+# Read-only at the workflow level; the one job that may publish asks for more.
 permissions:
   contents: read
 
@@ -34,53 +41,86 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The tag says which version this is; the manifests say what the binary will report. A
-  # mismatch would label a release with a version it does not contain, which no later download
-  # could detect -- so it is refused before anything is built or published. The tagged commit is
-  # also tested here, so a tag pushed onto a commit whose CI has not finished cannot ship.
+  # What to build, and which release identity it has. A rehearsal has no identity: the
+  # dispatched commit is the subject, and the artifacts are labelled after it so they cannot be
+  # mistaken for a release. A release refuses to start when the tag and the manifests disagree,
+  # because that would label a release with a version it does not contain -- which no later
+  # download could detect.
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
-      tag: ${{ steps.resolve.outputs.tag }}
-      version: ${{ steps.resolve.outputs.version }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      rehearsal: ${{ steps.resolve.outputs.rehearsal }}
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
     steps:
       - id: resolve
         env:
           EVENT: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
           TAG_INPUT: ${{ inputs.tag }}
+          REHEARSE_INPUT: ${{ inputs.rehearse }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" = "push" ]; then tag="$REF_NAME"; else tag="$TAG_INPUT"; fi
-          case "$tag" in
-            v[0-9]*) ;;
-            *) echo "::error::tag '$tag' must look like vX.Y.Z"; exit 1 ;;
-          esac
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = "push" ]; then
+            requested="$REF_NAME"; ref="$REF_NAME"; rehearsal=false
+          elif [ "${REHEARSE_INPUT:-false}" = "true" ]; then
+            requested=""; ref="$SHA"; rehearsal=true
+          else
+            requested="${TAG_INPUT:-}"; ref="$requested"; rehearsal=false
+            if [ -z "$requested" ]; then
+              echo "::error::dispatch without a tag needs rehearse: true (nothing to publish)"
+              exit 1
+            fi
+          fi
+          echo "requested=$requested" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "rehearsal=$rehearsal" >> "$GITHUB_OUTPUT"
 
       # Full history: the ancestry check below is meaningless against a shallow checkout.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ steps.resolve.outputs.tag }}
+          ref: ${{ steps.resolve.outputs.ref }}
           fetch-depth: 0
 
-      - name: tag agrees with the manifests
+      - id: identity
         env:
-          VERSION: ${{ steps.resolve.outputs.version }}
+          REQUESTED: ${{ steps.resolve.outputs.requested }}
+          REHEARSAL: ${{ steps.resolve.outputs.rehearsal }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          for crate in weigh weighd; do
-            manifest="$(grep -m1 '^version' "$crate/Cargo.toml" | cut -d'"' -f2)"
-            if [ "$manifest" != "$VERSION" ]; then
-              echo "::error::$crate/Cargo.toml is $manifest but the tag says $VERSION"
+          # Both crates carry the released version, and they have to agree with each other
+          # whether or not this is a rehearsal.
+          weigh_version="$(grep -m1 '^version' weigh/Cargo.toml | cut -d'"' -f2)"
+          weighd_version="$(grep -m1 '^version' weighd/Cargo.toml | cut -d'"' -f2)"
+          if [ "$weigh_version" != "$weighd_version" ]; then
+            echo "::error::weigh/Cargo.toml is $weigh_version but weighd/Cargo.toml is $weighd_version"
+            exit 1
+          fi
+          version="$weigh_version"
+          if [ "$REHEARSAL" = "true" ]; then
+            tag="v${version}-rehearsal-$(echo "$SHA" | cut -c1-7)"
+            echo "rehearsing $version as $tag (nothing will be published)"
+          else
+            tag="$REQUESTED"
+            case "$tag" in
+              v[0-9]*) ;;
+              *) echo "::error::tag '$tag' must look like vX.Y.Z"; exit 1 ;;
+            esac
+            if [ "${tag#v}" != "$version" ]; then
+              echo "::error::tag says ${tag#v} but both manifests say $version"
               exit 1
             fi
-          done
-          echo "version $VERSION agrees across the tag and both manifests"
+            echo "$tag agrees with the manifests"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: the tag is on main
+        if: steps.resolve.outputs.rehearsal != 'true'
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
@@ -91,7 +131,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: the tagged commit is green
+      - name: the commit is green
         run: cargo test --workspace --locked
 
   build:
@@ -133,10 +173,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
-      # The resolved tag, not the ref this workflow was dispatched from.
+      # The resolved commit, not the ref this workflow happens to run on.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.verify.outputs.tag }}
+          ref: ${{ needs.verify.outputs.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -146,7 +186,7 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }} -p weighd
 
       # The archive is the thing users download, so it is what gets checked: named after the
-      # tag, carrying the binary plus the licence and the crate's README.
+      # release identity, carrying the binary plus the licence and the crate's README.
       - name: package
         env:
           TAG: ${{ needs.verify.outputs.tag }}
@@ -190,13 +230,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Assembles the published set. It runs for a rehearsal too, because this is the half that a
+  # rehearsal has to exercise: the merge, the checksum file, and the four archives side by side.
+  # Only the last step -- the one that needs a release to exist -- is skipped there.
   release:
     needs: [verify, build]
-    if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      # The only job that writes: it creates the Release and uploads the assets.
+      # The only job that may write: it creates the Release and uploads the assets.
       contents: write
     steps:
       # Kept at v8 deliberately, one major ahead of the upload above: `upload-artifact@v7`
@@ -220,9 +262,19 @@ jobs:
           sha256sum *.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
+      # Always uploaded, so a rehearsal leaves something verifiable behind: without this the
+      # assembled set would exist only on a runner that is about to be destroyed.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: weighd-${{ needs.verify.outputs.tag }}-assets
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
       # A re-run of the same tag (a flaky matrix leg, say) replaces the assets instead of
       # failing on the ones that already exist.
       - name: publish
+        if: needs.verify.outputs.rehearsal != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.verify.outputs.tag }}

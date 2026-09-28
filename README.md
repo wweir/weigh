@@ -24,8 +24,13 @@ cargo run -p weighd --release -- --help
 Push a version tag: `git tag v0.1.0 && git push origin v0.1.0`. The release workflow refuses the
 tag unless it matches the version in both manifests and the tagged commit is on `main`, tests
 that commit, then builds `weighd` for x86_64/aarch64 Linux (glibc) and arm64/x86_64 macOS and
-attaches the archives plus `SHA256SUMS` to a GitHub Release. `workflow_dispatch` runs the same
-pipeline without publishing, which is how to rehearse it.
+attaches the archives plus `SHA256SUMS` to a GitHub Release.
+
+Rehearse it first with `gh workflow run release.yml` (the dispatch defaults to `rehearse: true`):
+that runs the same matrix and the same packaging from the branch dispatched on, needs no tag,
+publishes nothing, and leaves the assembled four archives and `SHA256SUMS` as a workflow
+artifact to inspect. `rehearse: false` with a `tag` is the path for re-publishing an existing
+release.
 
 ## Why this exists
 
