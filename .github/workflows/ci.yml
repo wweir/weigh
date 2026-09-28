@@ -8,6 +8,17 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push makes an in-flight run for the same ref uninteresting: cancel it and spend the
+# runner on the commit that is actually current.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# This workflow builds, tests and reads; it never writes to the repository. The release
+# workflow is the one that needs `contents: write`.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -15,6 +26,7 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -37,10 +49,25 @@ jobs:
       # The build needs a C and C++ compiler: `tokenizers` pulls `onig` (regex pre-tokenizers)
       # and `esaxx-rs` through its default features. ubuntu-latest ships both.
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # `weigh`'s crate documentation IS its README (`#![doc = include_str!("../README.md")]`),
+      # so rustdoc parses the file a user reads: a broken link or a mangled code fence fails
+      # here rather than shipping as a silent warning. The README's example is additionally
+      # compiled by the doc test in the `test` step below -- that is what keeps the documented
+      # API from drifting, and it is the reason there is no longer an `examples/` binary.
+      - name: rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
 
       - name: test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: release build
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --locked
+
+      # Users run the optimised, stripped binary, not the test build. Prove it starts and prints
+      # its usage instead of merely proving that it links.
+      - name: the release binary runs
+        run: ./target/release/weighd --help

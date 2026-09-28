@@ -14,10 +14,18 @@ The split is an API boundary, not a rename. `weigh` never sees a "criterion", an
 library; if you want the decision API, take the binary.
 
 ```bash
-cargo test --workspace                       # 93 tests, hermetic: no network, no GPU, no weights
+cargo test --workspace                       # 87 tests, hermetic: no network, no GPU, no weights
 cargo build --workspace --release            # ~4.6 MB stripped binary
 cargo run -p weighd --release -- --help
 ```
+
+## Releasing
+
+Push a version tag: `git tag v0.1.0 && git push origin v0.1.0`. The release workflow refuses the
+tag unless it matches the version in both manifests and the tagged commit is on `main`, tests
+that commit, then builds `weighd` for x86_64/aarch64 Linux (glibc) and arm64/x86_64 macOS and
+attaches the archives plus `SHA256SUMS` to a GitHub Release. `workflow_dispatch` runs the same
+pipeline without publishing, which is how to rehearse it.
 
 ## Why this exists
 

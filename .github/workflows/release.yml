@@ -1,0 +1,245 @@
+# Cut a release: build `weighd` for every supported platform, then attach the archives and a
+# checksum file to a GitHub Release.
+#
+# Triggered by a version tag (`v0.1.0`). `workflow_dispatch` runs the identical pipeline against
+# an existing tag but publishes nothing unless `publish` is checked, so the release machinery can
+# be rehearsed without shipping.
+#
+# What is deliberately NOT built here, and why:
+#   * Windows -- `weighd` registers SIGTERM/SIGINT through `signal-hook`, and while that crate
+#     does expose SIGTERM on Windows, the drain path has never been executed there. Adding an
+#     untested target to a release matrix means finding out on the tag that matters.
+#   * static musl -- a glibc build runs on the distributions this is deployed on; a musl build
+#     needs a cross toolchain for `tokenizers`' C dependencies (`onig`, `esaxx`) and is a
+#     separate piece of work, not a matrix line.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build, e.g. v0.1.0
+        required: true
+      publish:
+        description: Create the GitHub Release (unchecked = build and smoke-test only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The tag says which version this is; the manifests say what the binary will report. A
+  # mismatch would label a release with a version it does not contain, which no later download
+  # could detect -- so it is refused before anything is built or published. The tagged commit is
+  # also tested here, so a tag pushed onto a commit whose CI has not finished cannot ship.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - id: resolve
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "push" ]; then tag="$REF_NAME"; else tag="$TAG_INPUT"; fi
+          case "$tag" in
+            v[0-9]*) ;;
+            *) echo "::error::tag '$tag' must look like vX.Y.Z"; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      # Full history: the ancestry check below is meaningless against a shallow checkout.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.resolve.outputs.tag }}
+          fetch-depth: 0
+
+      - name: tag agrees with the manifests
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          for crate in weigh weighd; do
+            manifest="$(grep -m1 '^version' "$crate/Cargo.toml" | cut -d'"' -f2)"
+            if [ "$manifest" != "$VERSION" ]; then
+              echo "::error::$crate/Cargo.toml is $manifest but the tag says $VERSION"
+              exit 1
+            fi
+          done
+          echo "version $VERSION agrees across the tag and both manifests"
+
+      - name: the tag is on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
+            echo "::error::$(git rev-parse --short HEAD) is not on main; releases are cut from main"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: the tagged commit is green
+        run: cargo test --workspace --locked
+
+  build:
+    needs: verify
+    strategy:
+      # One target failing must not hide the state of the others: a partially built release is
+      # easier to reason about than a cancelled matrix.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            expect: 'ELF 64-bit.*x86-64'
+            run: 'true'
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            expect: 'ELF 64-bit.*aarch64'
+            run: 'true'
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            expect: 'Mach-O 64-bit.*arm64'
+            run: 'true'
+          - target: x86_64-apple-darwin
+            # Cross-built on the arm64 macOS runner: Apple's clang targets both architectures
+            # from one SDK. Not executed here (that would need Rosetta), so its architecture is
+            # asserted from the artifact itself instead.
+            os: macos-latest
+            expect: 'Mach-O 64-bit.*x86_64'
+            run: 'false'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      # The resolved tag, not the ref this workflow was dispatched from.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p weighd
+
+      # The archive is the thing users download, so it is what gets checked: named after the
+      # tag, carrying the binary plus the licence and the crate's README.
+      - name: package
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          name="weighd-${TAG}-${TARGET}"
+          mkdir -p "dist/$name"
+          cp "target/${TARGET}/release/weighd" "dist/$name/weighd"
+          cp weighd/LICENSE weighd/README.md "dist/$name/"
+          tar -czf "dist/${name}.tar.gz" -C dist "$name"
+          rm -rf "dist/$name"
+          echo "NAME=$name" >> "$GITHUB_ENV"
+
+      - name: artifact is the right architecture and not a stub
+        env:
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          set -euo pipefail
+          tar -xzf "dist/${NAME}.tar.gz" -C dist
+          file -b "dist/${NAME}/weighd" > detected.txt
+          cat detected.txt
+          grep -Eq "$EXPECT" detected.txt || {
+            echo "::error::expected /$EXPECT/ in the binary, got: $(cat detected.txt)"
+            exit 1
+          }
+          size=$(wc -c < "dist/${NAME}/weighd")
+          if [ "$size" -lt 1000000 ]; then
+            echo "::error::weighd is only $size bytes -- a release binary is megabytes"
+            exit 1
+          fi
+
+      - name: the release binary runs
+        if: matrix.run == 'true'
+        run: ./dist/${NAME}/weighd --help
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: weighd-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [verify, build]
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # The only job that writes: it creates the Release and uploads the assets.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Computed once, on the one platform whose `sha256sum` is guaranteed: macOS ships
+      # `shasum` instead, which is why the matrix jobs publish no checksums of their own.
+      - name: checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -l
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      # A re-run of the same tag (a flaky matrix leg, say) replaces the assets instead of
+      # failing on the ones that already exist.
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          weighd ${VERSION} -- SemIf's decision readout as an OpenAI-shaped HTTP service.
+
+          Assets are \`weighd-v${VERSION}-<target>.tar.gz\`, each containing the binary, \`LICENSE\`
+          and \`README.md\` for that target. Targets: x86_64/aarch64 Linux (glibc) and
+          arm64/x86_64 macOS. No Windows and no static musl build -- see the workflow comments.
+
+          Verify before running:
+
+          \`\`\`bash
+          sha256sum --check SHA256SUMS        # macOS: shasum -a 256 --check SHA256SUMS
+          tar -xzf weighd-v${VERSION}-<target>.tar.gz
+          ./weighd-v${VERSION}-<target>/weighd --help
+          \`\`\`
+
+          \`weighd\` needs a checkpoint directory (with \`tokenizer.json\`) and a vLLM >= 0.26.0 or
+          SGLang endpoint; both are refused at startup rather than guessed at. See the crate
+          README for the flags and the HTTP surface.
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber dist/*.tar.gz dist/SHA256SUMS
+          else
+            gh release create "$TAG" \
+              --verify-tag \
+              --title "weighd ${VERSION}" \
+              --notes-file notes.md \
+              dist/*.tar.gz dist/SHA256SUMS
+          fi
+          gh release view "$TAG" --json url,assets --jq '.url, (.assets[] | "\(.name)  \(.size) bytes")'
