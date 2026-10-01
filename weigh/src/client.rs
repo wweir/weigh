@@ -1434,8 +1434,19 @@ fn probe_sglang(agent: &ureq::Agent, url: &str, readout: Readout) -> Result<Prob
 }
 
 /// Mirror of `direct._slot_ids`, as a free function so the startup probe can use it
-/// before a `Client` exists.
+/// before a `Client` exists. Stricter than the Python copy in exactly one place: a count
+/// past the alphabet is refused rather than truncated to it, because a short slot vector is
+/// a silently under-scored decision, not a token-id disagreement.
 fn slot_ids_for(tokenizer: &Tokenizer, count: usize) -> Result<Vec<u32>, String> {
+    // `.take(count)` alone would return a short vector, leaving a `Prepared` whose slots do
+    // not line up with its options: a decision scored one value short, with nothing saying so.
+    if count > LETTERS.len() {
+        return Err(format!(
+            "{} options exceed the {} answer slots",
+            count,
+            LETTERS.len()
+        ));
+    }
     let mut result = Vec::with_capacity(count);
     for letter in LETTERS.chars().take(count) {
         let encoded = tokenizer
@@ -1986,6 +1997,39 @@ mod tests {
         let total: f64 = probabilities.iter().sum();
         assert!((total - 1.0).abs() < 1e-12);
         assert!(probabilities[0] > probabilities[1] && probabilities[1] > probabilities[2]);
+    }
+
+    /// The minimal tokenizer the slot contract needs: one distinct round-trip token per
+    /// letter, which a tiny vocab gives without a model download.
+    fn letter_tokenizer() -> Tokenizer {
+        let mut vocab = serde_json::Map::new();
+        vocab.insert("[UNK]".to_string(), json!(0));
+        for (index, letter) in LETTERS.chars().enumerate() {
+            vocab.insert(letter.to_string(), json!(index + 1));
+        }
+        let model = json!({
+            "version": "1.0", "truncation": null, "padding": null, "added_tokens": [],
+            "normalizer": null, "pre_tokenizer": {"type": "Whitespace"},
+            "post_processor": null, "decoder": null,
+            "model": {"type": "WordLevel", "vocab": vocab, "unk_token": "[UNK]"}
+        });
+        Tokenizer::from_bytes(model.to_string().as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn more_options_than_answer_slots_is_refused_not_truncated() {
+        let tokenizer = letter_tokenizer();
+        // The whole alphabet binds: every letter is one distinct round-trip token.
+        let slots = slot_ids_for(&tokenizer, LETTERS.len()).unwrap();
+        assert_eq!(slots.len(), LETTERS.len());
+        assert_eq!(
+            slots.iter().copied().collect::<HashSet<u32>>().len(),
+            LETTERS.len()
+        );
+        // One past the alphabet has to say so rather than hand back a short vector that
+        // leaves a row with fewer scored slots than options.
+        let error = slot_ids_for(&tokenizer, LETTERS.len() + 1).unwrap_err();
+        assert!(error.contains("answer slots"), "{}", error);
     }
 
     #[test]
