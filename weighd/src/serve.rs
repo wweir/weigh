@@ -974,8 +974,16 @@ fn logprobs_options(request: &Map<String, Value>) -> Result<(bool, usize), (u16,
 ///
 /// Not `DecisionSchema::label`, which renders the option *value* — that is what the caller
 /// gets back as `content`, not what the model produced.
+///
+/// Every index on this path is bounded by `DecisionSchema`'s `MAX_VALUES`, which *is*
+/// `LETTERS.len()`, so the slice cannot be short. A panic rather than the empty string
+/// `unwrap_or("")` used to return: an out-of-range index here is a divergence inside this
+/// crate, and `"token": ""` would report that the model scored nothing instead of saying
+/// what actually went wrong.
 fn slot_letter(index: usize) -> &'static str {
-    prompt::LETTERS.get(index..index + 1).unwrap_or("")
+    prompt::LETTERS
+        .get(index..index + 1)
+        .expect("slot index is bounded by DecisionSchema::MAX_VALUES")
 }
 
 /// The standard `choices[].logprobs.content` shape, filled from the same per-slot logprobs
@@ -2244,6 +2252,30 @@ mod tests {
             choice_logprobs(&[-0.5, -1.5], 1, 1)["content"][0]["token"],
             "B"
         );
+    }
+
+    /// The letter the response reports as the scored token must be the letter the prompt
+    /// bound to that same option index: `slot_letter` fills `logprobs.content[].token` while
+    /// `prompt::user_payload` fills `options[].letter`. Those are two independent statements
+    /// of one rule, so pin them against each other -- a change to the label a readout uses
+    /// would otherwise report a token the model was never offered.
+    #[test]
+    fn the_reported_scored_token_is_the_letter_the_prompt_bound_to_that_option() {
+        let descriptions: Vec<String> = vec!["yes".into(), "no".into(), "maybe".into()];
+        let payload = prompt::media_user_payload("evidence", "criterion", &descriptions).unwrap();
+        let parsed: Value = serde_json::from_str(&payload).unwrap();
+        let options = parsed["options"].as_array().unwrap();
+        assert_eq!(options.len(), descriptions.len());
+        for (index, option) in options.iter().enumerate() {
+            assert_eq!(
+                slot_letter(index),
+                option["letter"].as_str().unwrap(),
+                "option {} is bound to {} in the payload but reported as {} as the scored token",
+                index,
+                option["letter"],
+                slot_letter(index)
+            );
+        }
     }
 
     #[test]
