@@ -1,0 +1,48 @@
+# weighd as a systemd unit.
+#
+# Follows the least-privilege defaults (AGENTS.md Security Specifications 3): a dedicated
+# unprivileged user, no writable paths, no capabilities, and a read-only view of the host except
+# the checkpoint directory and the configuration file.
+#
+# Install:
+#   useradd --system --home /nonexistent --shell /usr/sbin/nologin weighd
+#   install -m 0755 dist/weighd /usr/local/bin/weighd
+#   install -m 0644 config/weighd.toml.example /etc/weighd/weighd.toml   # then edit
+#   install -m 0644 deploy/weighd.service /etc/systemd/system/
+#   systemctl enable --now weighd
+
+[Unit]
+Description=SemIf decision service (weighd)
+Documentation=https://github.com/wweir/weigh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=weighd
+Group=weighd
+
+# The checkpoint is read for tokenizer_config.json only; the backend does the tokenizing.
+ExecStart=/usr/local/bin/weighd --config /etc/weighd/weighd.toml
+
+# SIGTERM starts the drain: every in-flight decision finishes before the process exits.
+KillSignal=SIGTERM
+TimeoutStopSec=130s
+Restart=on-failure
+RestartSec=2s
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

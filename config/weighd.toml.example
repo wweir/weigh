@@ -1,0 +1,55 @@
+# weighd configuration example.
+#
+# Every value here is the built-in default except `model`, which is required. Copying this file
+# therefore changes nothing until a value is edited, but the server still refuses to start until
+# `model` names a checkpoint.
+#
+# The server is started with, for example:
+#   weighd --config config/weighd.toml
+#
+# Keys are spelled exactly like the command-line flags, dashes included, so a setting has one name
+# whether it comes from this file or from the command line.
+
+# Local checkpoint directory. It supplies tokenizer_config.json, which --template auto reads.
+# tokenizer.json is NOT required: this service asks the backend to tokenize.
+model = ""
+
+# One or more backend base URLs. All of them must serve the same checkpoint.
+urls = ["http://localhost:8000"]
+
+# auto probes each endpoint; vllm or sglang skip detection but still verify identity.
+backend = "auto"
+
+# exact-slot (default) refuses to start unless the backend honours logprob_token_ids.
+# top-n exists for vLLM < v0.26.0 and may read some rows through /generative_scoring.
+readout = "exact-slot"
+
+# auto detects the chat-template family from tokenizer_config.json.
+template = "auto"
+
+host = "127.0.0.1"
+port = 8080
+
+# Simultaneous decisions in flight. 0 means the derived default: 4x CPUs, clamped to [8, 64].
+workers = 0
+
+# Per backend request, in seconds.
+timeout = 120
+
+# Prompt token ceiling. 0 means the server's max_model_len - 1.
+max-prompt-tokens = 0
+
+revision = "unknown"
+allow-tokenizer-mismatch = false
+
+# Require `Authorization: Bearer KEY` on every route except GET /health.
+api-key = ""
+
+# CORS: "*" for any origin, or one exact origin. Empty means no CORS headers.
+cors-origin = ""
+
+allow-media = false
+allow-media-topn = false
+allow-remote-media = false
+max-images = 1
+max-media-bytes = 4194304
