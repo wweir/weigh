@@ -28,6 +28,9 @@ type fakeBackend struct {
 	started     int
 	inflight    int
 	maxInflight int
+	// prompts records every string this backend was asked to tokenize, so a test can read back
+	// exactly what the service rendered.
+	prompts []string
 }
 
 // enter/leave bracket one /v1/completions readout, and peakInflight reports the most the backend
@@ -54,6 +57,13 @@ func (f *fakeBackend) peakInflight() int {
 	return f.maxInflight
 }
 
+// tokenizedPrompts returns the prompts the service sent to /tokenize, in order.
+func (f *fakeBackend) tokenizedPrompts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.prompts...)
+}
+
 func (f *fakeBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/version":
@@ -67,6 +77,9 @@ func (f *fakeBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Prompt string `json:"prompt"`
 		}
 		decodeBody(r, &body)
+		f.mu.Lock()
+		f.prompts = append(f.prompts, body.Prompt)
+		f.mu.Unlock()
 		ids := runeIDs(body.Prompt)
 		writeJSON(w, map[string]any{"tokens": ids, "count": len(ids), "max_model_len": 4096})
 	case "/v1/completions":
@@ -289,6 +302,119 @@ func TestTextDecisionAnswersThePublishedShape(t *testing.T) {
 	if usage["prompt_tokens"] == nil || usage["completion_tokens"].(float64) != 1 {
 		t.Errorf("usage = %v", usage)
 	}
+}
+
+// TestTheDirectRowAssemblyBindsEverySchemaShape: the text path assembles its row directly, so
+// the 2..16 distinct values the schema guarantees and their label order are no longer re-checked
+// by prompt.ValidateRow. This is where that reliance is pinned: the boolean pair, an integer
+// enum, and the full A..P alphabet at the boundary.
+func TestTheDirectRowAssemblyBindsEverySchemaShape(t *testing.T) {
+	backend := &fakeBackend{}
+	server := newTestServer(t, backend, nil)
+
+	letters := make([]any, 0, 16)
+	for letter := 'a'; letter <= 'p'; letter++ {
+		letters = append(letters, string(letter))
+	}
+
+	cases := []struct {
+		name    string
+		schema  map[string]any
+		labels  []string
+		content string
+	}{
+		{
+			name:    "boolean pair",
+			schema:  enumDecisionSchema("v", "boolean", nil),
+			labels:  []string{"false", "true"},
+			content: `{"v":false}`,
+		},
+		{
+			name:    "integer enum",
+			schema:  enumDecisionSchema("v", "integer", []any{10, 20, 30}),
+			labels:  []string{"10", "20", "30"},
+			content: `{"v":10}`,
+		},
+		{
+			name:    "the full A..P alphabet",
+			schema:  enumDecisionSchema("v", "string", letters),
+			labels:  []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p"},
+			content: `{"v":"a"}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := post(t, server, "/v1/chat/completions", decisionBody(map[string]any{
+				"response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{"schema": tc.schema}},
+			}))
+			if status != 200 {
+				t.Fatalf("status = %d: %v", status, body)
+			}
+			choice := body["choices"].([]any)[0].(map[string]any)
+			semif := choice["semif"].(map[string]any)
+			// One option per declared value, in schema order: the readout's slots and the payload's
+			// letters both come from this list.
+			want := strings.Join(tc.labels, ",")
+			if got := joinedStrings(semif["labels"]); got != want {
+				t.Errorf("labels = %s, want %s", got, want)
+			}
+			if got := joinedStrings(semif["option_ids"]); got != want {
+				t.Errorf("option_ids = %s, want %s", got, want)
+			}
+			// The content is constructed from the winning value, so its JSON type must survive.
+			if got := choice["message"].(map[string]any)["content"]; got != tc.content {
+				t.Errorf("content = %v, want %s", got, tc.content)
+			}
+			// The row the service assembled is what the model actually saw: every option must be
+			// bound to its slot letter with its own description in the rendered payload.
+			captured := backend.tokenizedPrompts()
+			for index, label := range tc.labels {
+				letter := string(rune('A' + index))
+				fragment := fmt.Sprintf(`{"letter": %q, "description": %q}`, letter, label)
+				if !anyPromptContains(captured, fragment) {
+					t.Errorf("no tokenized prompt bound option %s to description %q", letter, label)
+				}
+			}
+		})
+	}
+}
+
+// enumDecisionSchema is a one-field decision schema: the field is `boolean` (its enum is fixed
+// by the type) or an enum of `string`/`integer` values.
+func enumDecisionSchema(field, kind string, values []any) map[string]any {
+	fieldSchema := map[string]any{"type": kind}
+	if values != nil {
+		fieldSchema["enum"] = values
+	}
+	return map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{field: fieldSchema},
+		"required":             []any{field},
+		"additionalProperties": false,
+	}
+}
+
+// joinedStrings renders a decoded JSON string array as a comma-joined list, which is what the
+// slot order assertions above compare.
+func joinedStrings(values any) string {
+	parts := values.([]any)
+	out := make([]string, len(parts))
+	for index, part := range parts {
+		out[index] = part.(string)
+	}
+	return strings.Join(out, ",")
+}
+
+// anyPromptContains reports whether any prompt sent to /tokenize carries the fragment. A rendered
+// prompt is tokenized once as itself and once per option letter appended, so the fragment must
+// appear verbatim in at least one of those strings.
+func anyPromptContains(prompts []string, fragment string) bool {
+	for _, prompt := range prompts {
+		if strings.Contains(prompt, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRequestRefusals(t *testing.T) {
