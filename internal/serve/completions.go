@@ -64,19 +64,18 @@ func (s *Server) chatCompletion(ctx context.Context, body []byte) reply {
 	} else {
 		evidence := folded.textEvidence()
 		optionIDs := decision.Labels()
-		options := make([]any, 0, len(optionIDs))
-		for _, label := range optionIDs {
-			options = append(options, map[string]any{"id": label, "description": label})
+		// The row is assembled directly instead of through prompt.ValidateRow: `decision` already
+		// guarantees 2..16 distinct values and `readMessages` already guarantees a nonempty
+		// criterion and evidence, so validating here would re-check data this process just built.
+		// ValidateRow stays the door for library callers; this is the service's own assembly.
+		row := &prompt.Row{
+			ID:       "serve-" + requestID(folded.criterion, evidence, decision),
+			State:    evidence,
+			Question: folded.criterion,
+			Options:  make([]prompt.Option, len(optionIDs)),
 		}
-		rowValue := map[string]any{
-			"id":       "serve-" + requestID(folded.criterion, evidence, decision),
-			"state":    evidence,
-			"question": folded.criterion,
-			"options":  options,
-		}
-		row, err := prompt.ValidateRow(rowValue)
-		if err != nil {
-			return errorResponse(400, "row_contract", err.Error())
+		for index, label := range optionIDs {
+			row.Options[index] = prompt.Option{ID: label, Description: label}
 		}
 		// The prompt is rendered here rather than inside the readout: `direct-options-v1` is this
 		// service's contract, and the readout deliberately takes a finished prompt string.

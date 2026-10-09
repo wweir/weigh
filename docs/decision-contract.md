@@ -68,7 +68,7 @@
 | 400 | `unsupported_parameter` | `n`、`tools`、`functions`、`tool_choice`、非正的 `max_tokens` |
 | 400 | `schema_*` | 15 种 schema 拒绝，见 `internal/schema` |
 | 400 | `messages_*`、`media_*`、`*_content_part`、`*_media` | 见 `docs/media-contract.md` |
-| 400 | `row_contract`、`prompt_contract` | 组装出的行或渲染出的提示词不可用 |
+| 400 | `prompt_contract` | 渲染出的提示词不可用 |
 | 502 | `backend_error` | 后端失败，且未耗尽预算 |
 | 503 | `client_gone` | 请求在取得并发槽位前已被取消（`/v1/semif/batch` 的该状态出现在单个条目里，信封本身仍是 200） |
 | 504 | `backend_timeout` | 读出耗尽了它的全部预算 |
